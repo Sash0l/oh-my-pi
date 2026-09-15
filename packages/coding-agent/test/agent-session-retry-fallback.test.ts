@@ -1484,6 +1484,7 @@ describe("AgentSession retry fallback", () => {
 			});
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
+			emitModelSelect: vi.fn(),
 			hasHandlers: vi.fn().mockReturnValue(false),
 			emitBeforeAgentStart: vi.fn(async () => {
 				if (!session) throw new Error("Expected active session");
@@ -3495,6 +3496,7 @@ describe("AgentSession retry fallback", () => {
 		const sessionStopLastAssistantMessages: Array<AssistantMessage | undefined> = [];
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
+			emitModelSelect: vi.fn(),
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
 			emitSessionStop: vi.fn((event: { last_assistant_message?: AssistantMessage }) => {
