@@ -133,6 +133,7 @@ import type {
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	ModelSelectSource,
 	PreparedExtension,
 	SessionBeforeBranchResult,
 	SessionBeforeSwitchResult,
@@ -1406,7 +1407,7 @@ export class AgentSession {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			setModelWithProviderSessionReset: (model, source) => this.#setModelWithProviderSessionReset(model, source),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -1454,7 +1455,7 @@ export class AgentSession {
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
-			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			setModelWithProviderSessionReset: (model, source) => this.#setModelWithProviderSessionReset(model, source),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
@@ -8927,14 +8928,14 @@ export class AgentSession {
 			if (!currentModel || this.#isDisposed) return;
 			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
 			if (updated && updated.contextWindow !== currentModel.contextWindow) {
-				await this.#setModelWithProviderSessionReset(updated);
+				await this.#setModelWithProviderSessionReset(updated, "set");
 			}
 		} catch (error) {
 			logger.warn("extended-context policy reapply failed", { error: String(error) });
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model, source: ModelSelectSource): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -8956,12 +8957,29 @@ export class AgentSession {
 		// `model_changed` has no extension-facing hook (`#emitExtensionEvent`
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
-		// retry-fallback on the error path.
+		// retry-fallback on the error path. The pi-compatible `model_select`
+		// notification keeps that contract: `#notifyModelSelect` dispatches it
+		// detached (fire-and-forget), never awaited on the switch path.
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
+			this.#notifyModelSelect(currentModel, model, source);
 		}
 
 		await this.#reconcileModelDependentState(currentModel, model);
+	}
+
+	/**
+	 * Fire the pi-compatible `model_select` notification (`ModelSelectEvent`).
+	 * Deliberately detached — the reasoning on `model_changed` above applies
+	 * unchanged: a model switch, including retry-fallback on the error path,
+	 * must not wait on extension handlers. Skipped entirely when no extension
+	 * registered a handler; handler errors are logged, never thrown.
+	 */
+	#notifyModelSelect(previousModel: Model | undefined, model: Model, source: ModelSelectSource): void {
+		if (!this.#extensionRunner?.hasHandlers("model_select")) return;
+		void this.#extensionRunner
+			.emit({ type: "model_select", model, previousModel, source })
+			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
 	}
 
 	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {
@@ -9628,7 +9646,7 @@ export class AgentSession {
 								currentModel.id !== match.id ||
 								currentModel.api !== match.api));
 					if (shouldResetProviderState) {
-						await this.#setModelWithProviderSessionReset(match);
+						await this.#setModelWithProviderSessionReset(match, "restore");
 					} else {
 						this.agent.setModel(match);
 					}
@@ -9763,15 +9781,17 @@ export class AgentSession {
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
 			let modelRolledBack = false;
+			let rolledBackModel: Model | undefined;
 			if (previousModel) {
-				const rolledBackModel = this.model;
+				rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
-			if (modelRolledBack) {
+			if (modelRolledBack && previousModel) {
 				this.#emit({ type: "model_changed" });
+				this.#notifyModelSelect(rolledBackModel, previousModel, "restore");
 			}
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
