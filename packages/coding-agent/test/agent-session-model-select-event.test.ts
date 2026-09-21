@@ -286,6 +286,60 @@ describe("AgentSession model_select extension event", () => {
 		expect(observed?.lastModelChange).toBe("anthropic/claude-sonnet-4-6");
 	});
 
+	it("delivers after a role switch applies its explicit thinking level", async () => {
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => session.thinkingLevel,
+				setThinkingLevel: level => session.setThinkingLevel(level),
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => session.model,
+				isIdle: () => !session.isStreaming,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+		);
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		if (!target.thinking) throw new Error("Expected claude-sonnet-4-6 to carry a thinking config");
+		// The role's explicit level (low) differs from the model default the
+		// handler observes; a post-transaction tail would overwrite the
+		// handler's `pi.setThinkingLevel("high")` with "low" after delivery.
+		const withDefaultLevel: Model<Api> = { ...target, thinking: { ...target.thinking, defaultLevel: Effort.Low } };
+		let observedLevel: string | undefined;
+		(globalThis as GateGlobal).__ompModelSelectAction = pi => {
+			observedLevel = session.thinkingLevel;
+			pi.setThinkingLevel(Effort.High);
+		};
+
+		await session.applyRoleModel({
+			role: "slow",
+			model: withDefaultLevel,
+			thinkingLevel: Effort.Low,
+			explicitThinkingLevel: true,
+		});
+		await waitForDeliveries();
+
+		// The handler saw the role's explicit low, and its high survives — the
+		// role tail no longer runs after the `model_select` commit.
+		expect(observedLevel).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("resolves dispose within the shutdown bound while a handler is parked, then fences new deliveries", async () => {
 		testSetSessionShutdownHandlerTimeoutMs(50);
 		try {

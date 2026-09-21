@@ -8510,6 +8510,9 @@ export class AgentSession {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** Apply this level inside the switch transaction (before the
+			 * `model_select` commit); see {@link ModelControls.setModel}. */
+			applyThinkingLevel?: ConfiguredThinkingLevel;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
